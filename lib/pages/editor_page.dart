@@ -74,7 +74,7 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _preview({bool selectionOnly = false}) async {
     if (rendering) return;
-    final sig = _sig() + (selectionOnly ? '_sel' : '');
+    final sig = selectionOnly ? '${_sig()}_sel_${selStart}_${selEnd}' : _sig();
     setState(() {
       rendering = true;
       statusText = selectionOnly ? '正在渲染选区…' : '正在渲染试听…';
@@ -91,8 +91,13 @@ class _EditorPageState extends State<EditorPage> {
         return;
       }
       final dir = await _cacheDir();
-      final start = selectionOnly ? selStart : null;
-      final end = selectionOnly ? selEnd : null;
+      // 试听也吃裁剪：设了裁剪范围就只渲染那一段
+      final start = selectionOnly
+          ? selStart
+          : (task.trimStart > 0 ? task.trimStart : null);
+      final end = selectionOnly
+          ? selEnd
+          : (task.effectiveEnd > 0 ? task.effectiveEnd : null);
       final path = '$dir/$sig.wav';
       final err = await Engine.instance.renderPreview(
         track: track,
@@ -191,17 +196,13 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _separate() async {
     if (rendering) return;
-    if (track.channels < 2) {
-      _toast('这轨是单声道，分离需要立体声');
-      return;
-    }
     setState(() {
       rendering = true;
-      statusText = '正在分离人声和伴奏…';
+      statusText = '正在分析频谱、分离人声和伴奏…（长歌要十几秒）';
     });
     try {
       final dir = '${Repo.instance.audioDir.path}/${task.id}';
-      final res = await Engine.instance.separateQuick(track, dir);
+      final res = await Engine.instance.separateDeep(track, dir);
       if (res['error'] != null) {
         _toast('分离失败：${res['error']}');
         return;
@@ -240,14 +241,9 @@ class _EditorPageState extends State<EditorPage> {
       });
       await Repo.instance.touch();
 
-      final srcDb = await Engine.instance.meanVolumeDb(track.path);
-      final instDb = await Engine.instance.meanVolumeDb(instPath);
-      if (srcDb != null && instDb != null && (srcDb - instDb) > 18) {
-        _toast('分离完成，但这条音频左右声道几乎一模一样（单声道 / AI 合成居多），'
-            '伴奏轨道会接近空白——这种只能靠 Demucs 模型分离');
-      } else {
-        _toast('分离完成：人声 + 伴奏已加入，原轨已静音（想对比可以手动打开原轨）');
-      }
+      _toast('分离完成：人声 + 伴奏已加入，原轨已静音。'
+          '这是频谱法（重复伴奏当背景减掉），伴奏很干净的歌会分得不错，'
+          '混响重、伴奏不重复的歌还会留残响')
     } catch (e) {
       _toast('分离异常：$e');
     } finally {
@@ -680,7 +676,7 @@ class _EditorPageState extends State<EditorPage> {
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
               child: Text(
-                '快速分离：中置声道提取，人声居中的立体声歌曲效果最好；伴奏里居中的乐器会被一并减去',
+                '频谱分离：把重复的伴奏当背景减掉，剩下人声；单声道 / AI 合成歌也能分，比声道法靠谱',
                 style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.35), height: 1.5),
               ),
             ),

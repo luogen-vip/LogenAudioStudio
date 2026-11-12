@@ -1,6 +1,10 @@
 import 'dart:io';
-import 'dart:math' as math;
+import 'dart:isolate';
 import 'dart:typed_data';
+
+import 'dart:math' as math;
+
+import 'spectral.dart';
 
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffprobe_kit.dart';
@@ -120,7 +124,7 @@ class Engine {
   }
 
   /// 返回滤镜链；没有任何改动时返回 null（直接转码，最快最稳）
-  String? _buildFilter(Track track, {required String inLabel, required String outLabel}) {
+  String? _buildFilter(Track track, {required String inLabel, required String outLabel, double? trimStart, double? trimEnd}) {
     final s = track.settings;
     final hasRegions = s.regions.any((r) => !r.isEmpty);
     if (!hasRegions && !s.hasGlobalFx) return null;
@@ -212,9 +216,16 @@ class Engine {
           '${(0.3 * wet).toStringAsFixed(3)}|${(0.2 * wet).toStringAsFixed(3)}');
     }
     if (s.gainDb != 0) chain.write(',volume=${s.gainDb.toStringAsFixed(2)}dB');
-    if (chain.isEmpty) chain.write(',anull');
-
-    buffer.write('[joined]$chain[$outLabel]');
+    // 注意：空链不能补 ",anull"，否则整体变成 "[joined],anull" 会解析出一个空滤镜名
+    final body = chain.toString();
+    var clean = body.startsWith(',') ? body.substring(1) : body;
+    // 裁剪放在最后：处理完再切，区域增益的时间轴才不会错位
+    if (trimStart != null && trimStart > 0) {
+      final end = (trimEnd != null && trimEnd > trimStart) ? 'end=${trimEnd.toStringAsFixed(3)}:' : '';
+      final cut = 'atrim=start=${trimStart.toStringAsFixed(3)}:${end},asetpts=PTS-STARTPTS';
+      clean = clean.isEmpty ? cut : '$clean,$cut';
+    }
+    buffer.write('[joined]${clean.isEmpty ? 'anull' : clean}[$outLabel]');
     return buffer.toString();
   }
 
@@ -234,20 +245,19 @@ class Engine {
     final trimEnd = (end != null && end > trimStart) ? end : 0.0;
 
     final args = <String>['-hide_banner', '-loglevel', 'error', '-y'];
-    if (trimStart > 0) args.addAll(['-ss', trimStart.toStringAsFixed(3)]);
-    if (trimEnd > 0) args.addAll(['-t', (trimEnd - trimStart).toStringAsFixed(3)]);
-    args.addAll(['-i', track.path]);
-
-    final filter = _buildFilter(track, inLabel: '0:a', outLabel: 'out');
-    if (filter != null) {
-      args.addAll(['-filter_complex', filter, '-map', '[out]']);
+    final f = _buildFilter(track,
+        inLabel: '0:a', outLabel: 'out',
+        trimStart: trimStart, trimEnd: trimEnd > 0 ? trimEnd : null);
+    if (f != null) {
+      args.addAll(['-i', track.path, '-filter_complex', f, '-map', '[out]']);
     } else {
-      args.addAll(['-map', '0:a']);
+      if (trimStart > 0) args.addAll(['-ss', trimStart.toStringAsFixed(3)]);
+      if (trimEnd > 0) args.addAll(['-t', (trimEnd - trimStart).toStringAsFixed(3)]);
+      args.addAll(['-i', track.path, '-map', '0:a']);
     }
     args.addAll(['-vn']);
     args.addAll(_codecArgs(config));
     args.addAll(['-ar', '${config.sampleRate}', '-ac', '${config.channels}', outPath]);
-
     return _run(args);
   }
 
@@ -263,8 +273,6 @@ class Engine {
     if (active.isEmpty) return '没有可导出的音轨';
 
     final args = <String>['-hide_banner', '-loglevel', 'error', '-y'];
-    if (start > 0) args.addAll(['-ss', start.toStringAsFixed(3)]);
-    if (end > start && end > 0) args.addAll(['-t', (end - start).toStringAsFixed(3)]);
     for (final t in active) {
       args.addAll(['-i', t.path]);
     }
@@ -285,7 +293,14 @@ class Engine {
       }
     }
     final inputs = List.generate(active.length, (i) => '[t$i]').join();
-    filters.write('$inputs amix=inputs=${active.length}:duration=longest:normalize=0[out]');
+    filters.write('$inputs amix=inputs=${active.length}:duration=longest:normalize=0[mixed]');
+    if (start > 0) {
+      final e = (end > start) ? 'end=${end.toStringAsFixed(3)}:' : '';
+      filters.write('[mixed]atrim=start=${start.toStringAsFixed(3)}:$e,'
+          'asetpts=PTS-STARTPTS[out]');
+    } else {
+      filters.write('[mixed]anull[out]');
+    }
 
     args.addAll(['-filter_complex', filters.toString(), '-map', '[out]', '-vn']);
     args.addAll(_codecArgs(config));
@@ -307,6 +322,89 @@ class Engine {
     } catch (_) {
       return null;
     }
+  }
+
+  /// 频谱分离（真算法）：把重复的伴奏当背景减掉，剩下人声
+  Future<Map<String, String>> separateDeep(Track track, String outDir) async {
+    final base = track.name.contains('.')
+        ? track.name.substring(0, track.name.lastIndexOf('.'))
+        : track.name;
+    final mixRaw = '$outDir/.${base}_mix.f32';
+    final vocalWav16 = '$outDir/.${base}_vocal16.wav';
+    final vocalPath = '$outDir/${base}_人声.wav';
+    final instPath = '$outDir/${base}_伴奏.wav';
+
+    // 1. 解码成 16k 单声道浮点
+    final err1 = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', track.path,
+      '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', '-acodec', 'pcm_f32le', mixRaw,
+    ]);
+    if (err1 != null) return {'error': err1};
+
+    final bytes = await File(mixRaw).readAsBytes();
+    final count = bytes.length ~/ 4;
+    final view = bytes.buffer.asFloat32List(bytes.offsetInBytes, count);
+    final samples = Float32List.fromList(view);
+
+    // 2. 频谱分离（独立 isolate，别卡住界面）
+    final vocals = await Isolate.run(() => Spectral.vocals(samples, half: 10));
+
+    // 3. 写 16k 单声道 wav
+    _writeWav16(vocalWav16, vocals, 16000);
+
+    // 4. 升回原采样率/立体声
+    final err2 = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', vocalWav16,
+      '-ar', '${track.sampleRate}', '-ac', '2', '-c:a', 'pcm_s16le', vocalPath,
+    ]);
+    if (err2 != null) return {'error': err2};
+
+    // 5. 伴奏 = 原曲 - 人声（真减法）
+    final err3 = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', track.path, '-i', vocalPath,
+      '-filter_complex',
+      '[1:a]volume=-1[v];[0:a][v]amix=inputs=2:duration=first:normalize=0[out]',
+      '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', '-ar', '${track.sampleRate}', '-ac', '2', instPath,
+    ]);
+    if (err3 != null) return {'error': err3};
+
+    for (final f in [mixRaw, vocalWav16]) {
+      try {
+        await File(f).delete();
+      } catch (_) {}
+    }
+    return {'vocal': vocalPath, 'inst': instPath};
+  }
+
+  void _writeWav16(String path, Float32List data, int sampleRate) {
+    final int16 = Int16List(data.length);
+    for (int i = 0; i < data.length; i++) {
+      var v = data[i];
+      if (v > 1) v = 1;
+      if (v < -1) v = -1;
+      int16[i] = (v * 32767).round();
+    }
+    final header = ByteData(44);
+    final byteLen = int16.length * 2;
+    header.setUint32(0, 0x52494646, Endian.little); // RIFF
+    header.setUint32(4, 36 + byteLen, Endian.little);
+    header.setUint32(8, 0x57415645, Endian.little); // WAVE
+    header.setUint32(12, 0x666d7420, Endian.little); // fmt
+    header.setUint32(16, 16, Endian.little);
+    header.setUint16(20, 1, Endian.little);
+    header.setUint16(22, 1, Endian.little);
+    header.setUint32(24, sampleRate, Endian.little);
+    header.setUint32(28, sampleRate * 2, Endian.little);
+    header.setUint16(32, 2, Endian.little);
+    header.setUint16(34, 16, Endian.little);
+    header.setUint32(36, 0x64617461, Endian.little); // data
+    header.setUint32(40, byteLen, Endian.little);
+
+    final f = File(path);
+    final sink = f.openSync(mode: FileMode.write);
+    sink.writeFromSync(header.buffer.asUint8List());
+    sink.writeFromSync(int16.buffer.asUint8List());
+    sink.closeSync();
   }
 
   /// 快速人声/伴奏分离：中置声道提取 + 反相抵消（立体声歌曲用，秒出结果）
