@@ -47,6 +47,10 @@ flutter build apk --release
 
 签名配置在 `android/app/build.gradle.kts`，keystore 为 `android/app/upload-keystore.jks`。
 
+## 已知限制
+
+- 「分离成人声 + 伴奏」用的是声道法（中置提取 + 左右声道相减）。如果这条音频左右声道几乎一模一样（单声道、部分 AI 合成歌曲），伴奏轨会接近空白 —— APP 会在分离后检测并提示。真正的 Demucs 模型分离还在接入。
+
 ## 说明
 
 - 人声/伴奏分离（Demucs）正在接入，见后续版本

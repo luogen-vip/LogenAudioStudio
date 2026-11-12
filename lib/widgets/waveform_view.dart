@@ -27,12 +27,13 @@ class WaveformView extends StatefulWidget {
 }
 
 class _WaveformViewState extends State<WaveformView> {
-  double? _dragStart;
-  bool _dragging = false;
-  static const double _handleZone = 22;
+  _DragMode _mode = _DragMode.none;
+  double _anchor = 0;
+  static const double _handleZone = 28;
 
   double _xToTime(double x, double width) {
     final dur = widget.duration <= 0 ? 1.0 : widget.duration;
+    if (width <= 0) return 0;
     return (x / width * dur).clamp(0.0, dur);
   }
 
@@ -46,32 +47,53 @@ class _WaveformViewState extends State<WaveformView> {
 
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTapDown: (d) {
-          widget.onSeek(_xToTime(d.localPosition.dx, width));
-        },
+        onTapDown: (d) => widget.onSeek(_xToTime(d.localPosition.dx, width)),
         onHorizontalDragStart: (d) {
           final x = d.localPosition.dx;
-          if ((x - sx).abs() < _handleZone) {
-            _dragStart = widget.selEnd;
-          } else if ((x - ex).abs() < _handleZone) {
-            _dragStart = widget.selStart;
+          // 抓哪根线，就只动那根线；抓选区中间，整体平移；抓空白，重新拉选区
+          final dStart = (x - sx).abs();
+          final dEnd = (x - ex).abs();
+          if (dStart < _handleZone && dStart <= dEnd) {
+            _mode = _DragMode.startEdge;
+            _anchor = widget.selEnd;
+          } else if (dEnd < _handleZone) {
+            _mode = _DragMode.endEdge;
+            _anchor = widget.selStart;
+          } else if (x > sx && x < ex) {
+            _mode = _DragMode.moveAll;
+            _anchor = _xToTime(x, width);
           } else {
-            _dragStart = _xToTime(x, width);
-            widget.onSelection(_dragStart!, _dragStart!);
+            _mode = _DragMode.newSelection;
+            final t = _xToTime(x, width);
+            _anchor = t;
+            widget.onSelection(t, t);
           }
-          _dragging = true;
-          setState(() {});
         },
         onHorizontalDragUpdate: (d) {
-          if (!_dragging || _dragStart == null) return;
           final t = _xToTime(d.localPosition.dx, width);
-          final a = math.min(_dragStart!, t);
-          final b = math.max(_dragStart!, t);
-          widget.onSelection(a, b);
+          switch (_mode) {
+            case _DragMode.startEdge:
+              widget.onSelection(t.clamp(0.0, math.max(0, _anchor - 0.02)), _anchor);
+              break;
+            case _DragMode.endEdge:
+              widget.onSelection(_anchor, t.clamp(math.min(_anchor + 0.02, dur), dur));
+              break;
+            case _DragMode.moveAll:
+              final delta = t - _anchor;
+              final len = widget.selEnd - widget.selStart;
+              double ns = widget.selStart + delta;
+              ns = ns.clamp(0.0, math.max(0.0, dur - len));
+              widget.onSelection(ns, ns + len);
+              _anchor = t;
+              break;
+            case _DragMode.newSelection:
+              widget.onSelection(math.min(_anchor, t), math.max(_anchor, t));
+              break;
+            case _DragMode.none:
+              break;
+          }
         },
-        onHorizontalDragEnd: (_) {
-          _dragging = false;
-        },
+        onHorizontalDragEnd: (_) => _mode = _DragMode.none,
         child: CustomPaint(
           painter: _WavePainter(
             peaks: widget.peaks,
@@ -86,6 +108,8 @@ class _WaveformViewState extends State<WaveformView> {
     });
   }
 }
+
+enum _DragMode { none, startEdge, endEdge, moveAll, newSelection }
 
 class _WavePainter extends CustomPainter {
   final List<double> peaks;

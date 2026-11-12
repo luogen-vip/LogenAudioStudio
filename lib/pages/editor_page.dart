@@ -34,6 +34,7 @@ class _EditorPageState extends State<EditorPage> {
 
   final AudioPlayer _player = AudioPlayer();
   String? _loadedPreview;
+  String? _previewSig;
 
   Track get track => task.tracks[trackIndex];
   TrackSettings get settings => track.settings;
@@ -73,6 +74,7 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _preview({bool selectionOnly = false}) async {
     if (rendering) return;
+    final sig = _sig() + (selectionOnly ? '_sel' : '');
     setState(() {
       rendering = true;
       statusText = selectionOnly ? '正在渲染选区…' : '正在渲染试听…';
@@ -83,14 +85,15 @@ class _EditorPageState extends State<EditorPage> {
         await _player.stop();
         await _player.setFilePath(track.path);
         _loadedPreview = track.path;
-        await _player.play();
+        _previewSig = sig;
+        _player.play();
         if (mounted) setState(() => statusText = null);
         return;
       }
       final dir = await _cacheDir();
       final start = selectionOnly ? selStart : null;
       final end = selectionOnly ? selEnd : null;
-      final path = '$dir/${_sig()}${selectionOnly ? '_sel' : ''}.wav';
+      final path = '$dir/$sig.wav';
       final err = await Engine.instance.renderPreview(
         track: track,
         outPath: path,
@@ -102,9 +105,10 @@ class _EditorPageState extends State<EditorPage> {
         return;
       }
       _loadedPreview = path;
+      _previewSig = sig;
       await _player.stop();
       await _player.setFilePath(path);
-      await _player.play();
+      _player.play();
       if (mounted) setState(() => statusText = null);
     } catch (e) {
       _toast('试听失败：$e');
@@ -121,14 +125,18 @@ class _EditorPageState extends State<EditorPage> {
   Future<void> _pause() async {
     if (_player.playing) {
       await _player.pause();
-    } else {
-      if (_loadedPreview != null && File(_loadedPreview!).existsSync()) {
-        await _player.play();
-      } else {
-        await _preview();
-      }
+      if (mounted) setState(() {});
+      return;
     }
-    setState(() {});
+    final fresh = _loadedPreview != null &&
+        File(_loadedPreview!).existsSync() &&
+        _previewSig == _sig();
+    if (fresh) {
+      _player.play();
+      setState(() {});
+    } else {
+      await _preview();
+    }
   }
 
   Future<void> _seek(double seconds) async {
@@ -231,7 +239,15 @@ class _EditorPageState extends State<EditorPage> {
         selEnd = task.tracks[trackIndex].duration;
       });
       await Repo.instance.touch();
-      _toast('分离完成：人声 + 伴奏已加入，原轨已静音（可手动打开）');
+
+      final srcDb = await Engine.instance.meanVolumeDb(track.path);
+      final instDb = await Engine.instance.meanVolumeDb(instPath);
+      if (srcDb != null && instDb != null && (srcDb - instDb) > 18) {
+        _toast('分离完成，但这条音频左右声道几乎一模一样（单声道 / AI 合成居多），'
+            '伴奏轨道会接近空白——这种只能靠 Demucs 模型分离');
+      } else {
+        _toast('分离完成：人声 + 伴奏已加入，原轨已静音（想对比可以手动打开原轨）');
+      }
     } catch (e) {
       _toast('分离异常：$e');
     } finally {
@@ -583,7 +599,6 @@ class _EditorPageState extends State<EditorPage> {
           value: value.clamp(min, max),
           min: min,
           max: max,
-          divisions: ((max - min) / (unit == '半音' ? 1 : (max - min) / 40)).round().clamp(1, 200),
           onChanged: (v) => setState(() => onChanged(v)),
           onChangeEnd: (_) => _persist(),
         ),

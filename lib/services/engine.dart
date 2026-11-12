@@ -294,6 +294,21 @@ class Engine {
     return _run(args);
   }
 
+  /// 读取一条音频的平均音量（dB），用 volumedetect
+  Future<double?> meanVolumeDb(String path) async {
+    try {
+      final session = await FFmpegKit.executeWithArguments([
+        '-hide_banner', '-i', path, '-af', 'volumedetect', '-f', 'null', '/dev/null',
+      ]);
+      final logs = await session.getAllLogsAsString() ?? '';
+      final m = RegExp(r'mean_volume:\s*(-?[0-9.]+)').firstMatch(logs);
+      if (m == null) return null;
+      return double.tryParse(m.group(1)!);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 快速人声/伴奏分离：中置声道提取 + 反相抵消（立体声歌曲用，秒出结果）
   Future<Map<String, String>> separateQuick(Track track, String outDir) async {
     if (track.channels < 2) {
@@ -311,11 +326,11 @@ class Engine {
     ]);
     if (vocalErr != null) return {'error': vocalErr};
 
+    // 伴奏 = 左右声道相减（中置的人声被抵消），这是真减法，不是叠两层
     final instErr = await _run([
       '-hide_banner', '-loglevel', 'error', '-y', '-i', track.path,
       '-filter_complex',
-      '[0:a]asplit=2[o][v];[v]pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=70[voc];'
-          '[o][voc]amix=inputs=2:weights=1 -1:normalize=0[out]',
+      '[0:a]pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0[out]',
       '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', '-ar', '${track.sampleRate}', '-ac', '2', instPath,
     ]);
     if (instErr != null) return {'error': instErr};
