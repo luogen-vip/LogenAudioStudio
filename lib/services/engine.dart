@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffprobe_kit.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
 
 import '../models/track.dart';
@@ -55,7 +56,8 @@ class Engine {
 
   /// 解码成 8kHz 单声道原始 PCM，再压成 buckets 个峰值点
   Future<List<double>> peaks(String path, {int buckets = 2400}) async {
-    final tmp = '${Directory.systemTemp.path}/peaks_${DateTime.now().microsecondsSinceEpoch}.raw';
+    final cacheDir = await getTemporaryDirectory();
+    final tmp = '${cacheDir.path}/peaks_${DateTime.now().microsecondsSinceEpoch}.raw';
     final cmd = '-y -i "${_q(path)}" -vn -ac 1 -ar 8000 -f s16le "$tmp"';
     final session = await FFmpegKit.execute(cmd);
     final rc = await session.getReturnCode();
