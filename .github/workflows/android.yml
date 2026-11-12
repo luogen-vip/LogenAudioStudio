@@ -1,5 +1,8 @@
 name: android
 
+permissions:
+  contents: write
+
 on:
   push:
     branches: [ main ]
@@ -34,12 +37,13 @@ jobs:
 
       - name: Build APK
         run: |
-          flutter build apk --release --build-name "${VERSION}" --build-number ${{ github.run_number }}
+          flutter build apk --release --split-per-abi --build-name "${VERSION}" --build-number ${{ github.run_number }}
 
       - name: Rename
         run: |
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk "dist/LogenAudioStudio-v${VERSION}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/LogenAudioStudio-v${VERSION}.apk" 2>/dev/null || true
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "dist/LogenAudioStudio-v${VERSION}.apk"
           ls -lh dist
 
       - uses: actions/upload-artifact@v4
