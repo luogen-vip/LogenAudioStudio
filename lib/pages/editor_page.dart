@@ -78,6 +78,15 @@ class _EditorPageState extends State<EditorPage> {
       statusText = selectionOnly ? '正在渲染选区…' : '正在渲染试听…';
     });
     try {
+      // 没改过任何参数：直接播原文件，秒开
+      if (!selectionOnly && track.settings.isPristine && task.trimStart <= 0) {
+        await _player.stop();
+        await _player.setFilePath(track.path);
+        _loadedPreview = track.path;
+        await _player.play();
+        if (mounted) setState(() => statusText = null);
+        return;
+      }
       final dir = await _cacheDir();
       final start = selectionOnly ? selStart : null;
       final end = selectionOnly ? selEnd : null;
@@ -170,6 +179,67 @@ class _EditorPageState extends State<EditorPage> {
 
   void _persist() {
     Repo.instance.touch();
+  }
+
+  Future<void> _separate() async {
+    if (rendering) return;
+    if (track.channels < 2) {
+      _toast('这轨是单声道，分离需要立体声');
+      return;
+    }
+    setState(() {
+      rendering = true;
+      statusText = '正在分离人声和伴奏…';
+    });
+    try {
+      final dir = '${Repo.instance.audioDir.path}/${task.id}';
+      final res = await Engine.instance.separateQuick(track, dir);
+      if (res['error'] != null) {
+        _toast('分离失败：${res['error']}');
+        return;
+      }
+      final vocalPath = res['vocal']!;
+      final instPath = res['inst']!;
+      final vInfo = await Engine.instance.probe(vocalPath);
+      final iInfo = await Engine.instance.probe(instPath);
+      final vPeaks = await Engine.instance.peaks(vocalPath);
+      final iPeaks = await Engine.instance.peaks(instPath);
+      setState(() {
+        task.tracks.add(Track(
+          id: '${DateTime.now().microsecondsSinceEpoch}_v',
+          name: vocalPath.split('/').last,
+          path: vocalPath,
+          duration: vInfo.duration,
+          sampleRate: vInfo.sampleRate,
+          channels: vInfo.channels,
+          peaks: vPeaks,
+          role: 'vocal',
+        ));
+        task.tracks.add(Track(
+          id: '${DateTime.now().microsecondsSinceEpoch}_i',
+          name: instPath.split('/').last,
+          path: instPath,
+          duration: iInfo.duration,
+          sampleRate: iInfo.sampleRate,
+          channels: iInfo.channels,
+          peaks: iPeaks,
+          role: 'inst',
+        ));
+        track.muted = true;
+        trackIndex = task.tracks.length - 2;
+        selStart = 0;
+        selEnd = task.tracks[trackIndex].duration;
+      });
+      await Repo.instance.touch();
+      _toast('分离完成：人声 + 伴奏已加入，原轨已静音（可手动打开）');
+    } catch (e) {
+      _toast('分离异常：$e');
+    } finally {
+      if (mounted) setState(() {
+        rendering = false;
+        statusText = null;
+      });
+    }
   }
 
   Future<void> _addTrack() async {
@@ -578,6 +648,27 @@ class _EditorPageState extends State<EditorPage> {
         padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
         child: Column(
           children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: rendering ? null : _separate,
+                      icon: const Icon(Icons.call_split, size: 18),
+                      label: const Text('分离成人声 + 伴奏', style: TextStyle(fontSize: 12)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+              child: Text(
+                '快速分离：中置声道提取，人声居中的立体声歌曲效果最好；伴奏里居中的乐器会被一并减去',
+                style: TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.35), height: 1.5),
+              ),
+            ),
             for (int i = 0; i < task.tracks.length; i++)
               ListTile(
                 dense: true,

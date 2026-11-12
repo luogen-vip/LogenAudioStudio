@@ -4,8 +4,8 @@ import 'dart:typed_data';
 
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffprobe_kit.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../models/track.dart';
 
@@ -58,10 +58,11 @@ class Engine {
   Future<List<double>> peaks(String path, {int buckets = 2400}) async {
     final cacheDir = await getTemporaryDirectory();
     final tmp = '${cacheDir.path}/peaks_${DateTime.now().microsecondsSinceEpoch}.raw';
-    final cmd = '-y -i "${_q(path)}" -vn -ac 1 -ar 8000 -f s16le "$tmp"';
-    final session = await FFmpegKit.execute(cmd);
-    final rc = await session.getReturnCode();
-    if (!ReturnCode.isSuccess(rc)) return [];
+    final err = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', path, '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', tmp,
+    ]);
+    if (err != null) return [];
     try {
       final bytes = await File(tmp).readAsBytes();
       final data = ByteData.sublistView(bytes);
@@ -79,7 +80,6 @@ class Engine {
         }
         out[b] = peak / 32768.0;
       }
-      // 归一化，让小音量音频也能看清波形
       final maxV = out.reduce(math.max);
       if (maxV > 0.02) {
         for (int i = 0; i < out.length; i++) {
@@ -96,19 +96,43 @@ class Engine {
     }
   }
 
-  String _q(String p) => p.replaceAll('"', '\\"').replaceAll("'", "");
+  Future<String?> _run(List<String> args) async {
+    try {
+      final session = await FFmpegKit.executeWithArguments(args);
+      final rc = await session.getReturnCode();
+      if (ReturnCode.isSuccess(rc)) return null;
+      final logs = await session.getAllLogsAsString() ?? '';
+      final lines = logs
+          .split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.isNotEmpty)
+          .where((l) => !l.startsWith('ffmpeg version') && !l.startsWith('configuration:') && !l.startsWith('built with'))
+          .toList();
+      final errLines = lines
+          .where((l) => RegExp(r'error|invalid|unknown|unsupported|no such|failed|not found', caseSensitive: false).hasMatch(l))
+          .toList();
+      if (errLines.isNotEmpty) return errLines.take(3).join('\n');
+      if (lines.isNotEmpty) return lines.take(3).join('\n');
+      return '处理失败（返回码 ${rc?.getValue()}）';
+    } catch (e) {
+      return '执行异常：$e';
+    }
+  }
 
-  /// 单轨完整滤镜链（含区间分段）
-  String _trackFilter(Track track, {String inLabel = '0:a', required String outLabel}) {
+  /// 返回滤镜链；没有任何改动时返回 null（直接转码，最快最稳）
+  String? _buildFilter(Track track, {required String inLabel, required String outLabel}) {
     final s = track.settings;
-    final dur = track.duration > 0 ? track.duration : 1e9;
+    final hasRegions = s.regions.any((r) => !r.isEmpty);
+    if (!hasRegions && !s.hasGlobalFx) return null;
 
-    // 分区段：区间的边界把时间轴切开
+    final dur = track.duration > 0 ? track.duration : 1e9;
     final cuts = <double>[0];
-    for (final r in s.regions) {
-      if (r.isEmpty) continue;
-      if (r.start > 0 && r.start < dur) cuts.add(r.start);
-      if (r.end > 0 && r.end < dur) cuts.add(r.end);
+    if (hasRegions) {
+      for (final r in s.regions) {
+        if (r.isEmpty) continue;
+        if (r.start > 0 && r.start < dur) cuts.add(r.start);
+        if (r.end > 0 && r.end < dur) cuts.add(r.end);
+      }
     }
     cuts.add(dur);
     cuts.sort();
@@ -119,7 +143,9 @@ class Engine {
       final start = cuts[i];
       final end = cuts[i + 1];
       if (end - start < 0.02) continue;
-      final active = s.regions.where((r) => !r.isEmpty && r.start <= start + 0.0001 && r.end >= end - 0.0001).toList();
+      final active = s.regions
+          .where((r) => !r.isEmpty && r.start <= start + 0.0001 && r.end >= end - 0.0001)
+          .toList();
       String chain = '';
       if (active.isNotEmpty) {
         final g = active.map((r) => r.gainDb).reduce((a, b) => a + b);
@@ -146,15 +172,12 @@ class Engine {
       buffer.write('$labels concat=n=$idx:v=0:a=1[joined];');
     }
 
-    // 全局链
     final chain = StringBuffer();
     final sr = track.sampleRate > 0 ? track.sampleRate : _srFallback.toInt();
     if (s.pitch != 0) {
       final f = math.pow(2, s.pitch / 12).toDouble();
-      final rate = (sr * f).round();
-      chain.write(',asetrate=$rate,aresample=$sr');
+      chain.write(',asetrate=${(sr * f).round()},aresample=$sr');
       double tempo = 1.0 / f;
-      // atempo 单级只支持 0.5~2
       while (tempo > 2.0) {
         chain.write(',atempo=2.0');
         tempo /= 2.0;
@@ -185,7 +208,8 @@ class Engine {
     }
     if (s.reverb > 0) {
       final wet = (s.reverb / 100).clamp(0.0, 1.0);
-      chain.write(',aecho=0.8:${(0.6 + 0.4 * wet).toStringAsFixed(2)}:60|120:${(0.3 * wet).toStringAsFixed(3)}|${(0.2 * wet).toStringAsFixed(3)}');
+      chain.write(',aecho=0.8:${(0.6 + 0.4 * wet).toStringAsFixed(2)}:60|120:'
+          '${(0.3 * wet).toStringAsFixed(3)}|${(0.2 * wet).toStringAsFixed(3)}');
     }
     if (s.gainDb != 0) chain.write(',volume=${s.gainDb.toStringAsFixed(2)}dB');
     if (chain.isEmpty) chain.write(',anull');
@@ -194,12 +218,9 @@ class Engine {
     return buffer.toString();
   }
 
-  Future<String?> _run(String cmd) async {
-    final session = await FFmpegKit.execute(cmd);
-    final rc = await session.getReturnCode();
-    if (ReturnCode.isSuccess(rc)) return null;
-    final logs = await session.getAllLogsAsString();
-    return (logs == null || logs.isEmpty) ? '处理失败（返回码 ${rc?.getValue()}）' : logs;
+  List<String> _codecArgs(ExportConfig c) {
+    if (c.format == 'mp3') return ['-c:a', 'libmp3lame', '-b:a', '${c.bitrate}k'];
+    return ['-c:a', 'pcm_s16le'];
   }
 
   Future<String?> renderTrack({
@@ -208,20 +229,26 @@ class Engine {
     ExportConfig config = const ExportConfig(),
     double? start,
     double? end,
-    String? tempDir,
   }) async {
-    final filter = _trackFilter(track, outLabel: 'out');
-    final ss = (start != null && start > 0) ? '-ss ${start.toStringAsFixed(3)} ' : '';
-    final t = (start != null && end != null && end > start) ? '-t ${(end - start).toStringAsFixed(3)} ' : '';
-    final codec = _codec(config);
-    final cmd = '-y $ss$t-i "${_q(track.path)}" -filter_complex "${filter.replaceAll('"', '')}" '
-        '-map "[out]" -vn $codec -ar ${config.sampleRate} -ac ${config.channels} "${_q(outPath)}"';
-    return _run(cmd);
-  }
+    final trimStart = (start != null && start > 0) ? start : 0.0;
+    final trimEnd = (end != null && end > trimStart) ? end : 0.0;
 
-  String _codec(ExportConfig c) {
-    if (c.format == 'mp3') return '-c:a libmp3lame -b:a ${c.bitrate}k';
-    return '-c:a pcm_s16le';
+    final args = <String>['-hide_banner', '-loglevel', 'error', '-y'];
+    if (trimStart > 0) args.addAll(['-ss', trimStart.toStringAsFixed(3)]);
+    if (trimEnd > 0) args.addAll(['-t', (trimEnd - trimStart).toStringAsFixed(3)]);
+    args.addAll(['-i', track.path]);
+
+    final filter = _buildFilter(track, inLabel: '0:a', outLabel: 'out');
+    if (filter != null) {
+      args.addAll(['-filter_complex', filter, '-map', '[out]']);
+    } else {
+      args.addAll(['-map', '0:a']);
+    }
+    args.addAll(['-vn']);
+    args.addAll(_codecArgs(config));
+    args.addAll(['-ar', '${config.sampleRate}', '-ac', '${config.channels}', outPath]);
+
+    return _run(args);
   }
 
   /// 多轨混音（人声 + 伴奏），每轨各自应用自己的参数
@@ -235,36 +262,65 @@ class Engine {
     final active = tracks.where((t) => !t.muted).toList();
     if (active.isEmpty) return '没有可导出的音轨';
 
-    final inputs = StringBuffer();
+    final args = <String>['-hide_banner', '-loglevel', 'error', '-y'];
+    if (start > 0) args.addAll(['-ss', start.toStringAsFixed(3)]);
+    if (end > start && end > 0) args.addAll(['-t', (end - start).toStringAsFixed(3)]);
+    for (final t in active) {
+      args.addAll(['-i', t.path]);
+    }
+
     final filters = StringBuffer();
     for (int i = 0; i < active.length; i++) {
-      inputs.write(' -i "${_q(active[i].path)}"');
-      filters.write(_trackFilter(active[i], inLabel: '$i:a', outLabel: 't$i'));
-      filters.write(';');
-    }
-    final labels = List.generate(active.length, (i) => '[t$i]').join();
-    final volChain = StringBuffer();
-    for (int i = 0; i < active.length; i++) {
-      volChain.write('$labels');
-    }
-    final ss = start > 0 ? '-ss ${start.toStringAsFixed(3)} ' : '';
-    final t = (end > start && end > 0) ? '-t ${(end - start).toStringAsFixed(3)} ' : '';
-
-    // 每一轨先套自己的音量，再用 amix 合并（normalize=0 保证音量不被自动压低）
-    final perVol = StringBuffer();
-    for (int i = 0; i < active.length; i++) {
-      final v = active[i].volume;
-      if (v != 1.0) {
-        filters.write('[t$i]volume=${v.toStringAsFixed(3)}[v$i];');
+      final f = _buildFilter(active[i], inLabel: '$i:a', outLabel: 'src$i');
+      if (f != null) {
+        filters.write(f);
+        filters.write(';');
+      } else {
+        filters.write('[$i:a]anull[src$i];');
+      }
+      if (active[i].volume != 1.0) {
+        filters.write('[src$i]volume=${active[i].volume.toStringAsFixed(3)}[t$i];');
+      } else {
+        filters.write('[src$i]anull[t$i];');
       }
     }
-    final mixInputs = List.generate(active.length, (i) => active[i].volume == 1.0 ? '[t$i]' : '[v$i]').join();
-    perVol.write('$mixInputs amix=inputs=${active.length}:duration=longest:normalize=0[out]');
+    final inputs = List.generate(active.length, (i) => '[t$i]').join();
+    filters.write('$inputs amix=inputs=${active.length}:duration=longest:normalize=0[out]');
 
-    final codec = _codec(config);
-    final cmd = '-y $ss$t$inputs -filter_complex "${filters.toString().replaceAll('"', '')}$perVol" '
-        '-map "[out]" -vn $codec -ar ${config.sampleRate} -ac ${config.channels} "${_q(outPath)}"';
-    return _run(cmd);
+    args.addAll(['-filter_complex', filters.toString(), '-map', '[out]', '-vn']);
+    args.addAll(_codecArgs(config));
+    args.addAll(['-ar', '${config.sampleRate}', '-ac', '${config.channels}', outPath]);
+
+    return _run(args);
+  }
+
+  /// 快速人声/伴奏分离：中置声道提取 + 反相抵消（立体声歌曲用，秒出结果）
+  Future<Map<String, String>> separateQuick(Track track, String outDir) async {
+    if (track.channels < 2) {
+      return {'error': '这轨是单声道，没法做声道分离（中置提取需要立体声）'};
+    }
+    final base = track.name.contains('.') ? track.name.substring(0, track.name.lastIndexOf('.')) : track.name;
+    final vocalPath = '$outDir/${base}_人声.wav';
+    final instPath = '$outDir/${base}_伴奏.wav';
+
+    final vocalErr = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', track.path,
+      '-filter_complex',
+      '[0:a]pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=70[v];[v]anull[out]',
+      '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', '-ar', '${track.sampleRate}', '-ac', '2', vocalPath,
+    ]);
+    if (vocalErr != null) return {'error': vocalErr};
+
+    final instErr = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', track.path,
+      '-filter_complex',
+      '[0:a]asplit=2[o][v];[v]pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=70[voc];'
+          '[o][voc]amix=inputs=2:weights=1 -1:normalize=0[out]',
+      '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', '-ar', '${track.sampleRate}', '-ac', '2', instPath,
+    ]);
+    if (instErr != null) return {'error': instErr};
+
+    return {'vocal': vocalPath, 'inst': instPath};
   }
 
   Future<String?> renderPreview({required Track track, required String outPath, double? start, double? end}) {
