@@ -243,7 +243,7 @@ class _EditorPageState extends State<EditorPage> {
 
       _toast('分离完成：人声 + 伴奏已加入，原轨已静音。'
           '这是频谱法（重复伴奏当背景减掉），伴奏很干净的歌会分得不错，'
-          '混响重、伴奏不重复的歌还会留残响')
+          '混响重、伴奏不重复的歌还会留残响');
     } catch (e) {
       _toast('分离异常：$e');
     } finally {
