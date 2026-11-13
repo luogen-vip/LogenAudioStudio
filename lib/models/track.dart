@@ -1,19 +1,36 @@
 import 'dart:convert';
 
-/// 单段区间编辑：在一段音频的某段时间里单独加增益 / 低切
+/// 单段区间编辑：这一段单独用一套参数，段外还是全轨的那套
 class RegionEdit {
   double start;
   double end;
   double gainDb;
   double lowCut;
+  double bassDb;
+  double trebleDb;
+  double reverb;
+  bool compress;
 
-  RegionEdit({required this.start, required this.end, this.gainDb = 0, this.lowCut = 0});
+  RegionEdit({
+    required this.start,
+    required this.end,
+    this.gainDb = 0,
+    this.lowCut = 0,
+    this.bassDb = 0,
+    this.trebleDb = 0,
+    this.reverb = 0,
+    this.compress = false,
+  });
 
   Map<String, dynamic> toJson() => {
         'start': start,
         'end': end,
         'gainDb': gainDb,
         'lowCut': lowCut,
+        'bassDb': bassDb,
+        'trebleDb': trebleDb,
+        'reverb': reverb,
+        'compress': compress,
       };
 
   factory RegionEdit.fromJson(Map<String, dynamic> j) => RegionEdit(
@@ -21,9 +38,25 @@ class RegionEdit {
         end: (j['end'] as num).toDouble(),
         gainDb: (j['gainDb'] as num?)?.toDouble() ?? 0,
         lowCut: (j['lowCut'] as num?)?.toDouble() ?? 0,
+        bassDb: (j['bassDb'] as num?)?.toDouble() ?? 0,
+        trebleDb: (j['trebleDb'] as num?)?.toDouble() ?? 0,
+        reverb: (j['reverb'] as num?)?.toDouble() ?? 0,
+        compress: j['compress'] == true,
       );
 
-  bool get isEmpty => gainDb == 0 && lowCut == 0;
+  bool get isEmpty =>
+      gainDb == 0 && lowCut == 0 && bassDb == 0 && trebleDb == 0 && reverb == 0 && !compress;
+
+  RegionEdit copyWith({double? start, double? end}) => RegionEdit(
+        start: start ?? this.start,
+        end: end ?? this.end,
+        gainDb: gainDb,
+        lowCut: lowCut,
+        bassDb: bassDb,
+        trebleDb: trebleDb,
+        reverb: reverb,
+        compress: compress,
+      );
 }
 
 /// 一整轨的处理参数（全局生效）

@@ -125,6 +125,32 @@ class Engine {
     }
   }
 
+  /// 一段音频的静态处理链（不改变时间轴）
+  String _segChain({
+    required double gain,
+    required double lowCut,
+    required double bass,
+    required double treble,
+    required double reverb,
+    required bool compress,
+  }) {
+    var out = '';
+    if (lowCut > 0) out += ',highpass=f=${lowCut.toStringAsFixed(0)}';
+    if (bass != 0) out += ',bass=g=${bass.toStringAsFixed(1)}:f=110';
+    if (treble != 0) out += ',treble=g=${treble.toStringAsFixed(1)}:f=3000';
+    if (compress) out += ',compand=attacks=0:decays=0.3:points=-80/-80|-25/-22|0/-6:soft-knee=6:gain=0:volume=0';
+    if (reverb > 0) {
+      // 三层延迟，模拟房间/音箱那种“有余响”的感觉
+      final wet = (reverb / 100).clamp(0.0, 1.0);
+      final d = (40 + 160 * wet).round();
+      out += ',aecho=0.85:0.9:${d}|${d + 50}|${d + 120}|${d + 210}:'
+          '${(0.55 * wet).toStringAsFixed(3)}|${(0.38 * wet).toStringAsFixed(3)}|'
+          '${(0.22 * wet).toStringAsFixed(3)}|${(0.12 * wet).toStringAsFixed(3)}';
+    }
+    if (gain != 0) out += ',volume=${gain.toStringAsFixed(2)}dB';
+    return out;
+  }
+
   /// 返回滤镜链；没有任何改动时返回 null（直接转码，最快最稳）
   String? _buildFilter(Track track, {required String inLabel, required String outLabel, double? trimStart, double? trimEnd}) {
     final s = track.settings;
@@ -149,16 +175,27 @@ class Engine {
       final start = cuts[i];
       final end = cuts[i + 1];
       if (end - start < 0.02) continue;
+      // 这一段用哪套参数：被最后标记的那段覆盖就用它，没覆盖就用全轨参数
       final active = s.regions
           .where((r) => !r.isEmpty && r.start <= start + 0.0001 && r.end >= end - 0.0001)
           .toList();
-      String chain = '';
-      if (active.isNotEmpty) {
-        final g = active.map((r) => r.gainDb).reduce((a, b) => a + b);
-        final lc = active.map((r) => r.lowCut).reduce((a, b) => math.max(a, b));
-        if (lc > 0) chain += ',highpass=f=${lc.toStringAsFixed(0)}';
-        if (g != 0) chain += ',volume=${g.toStringAsFixed(2)}dB';
-      }
+      final chain = active.isNotEmpty
+          ? _segChain(
+              gain: active.last.gainDb,
+              lowCut: active.last.lowCut,
+              bass: active.last.bassDb,
+              treble: active.last.trebleDb,
+              reverb: active.last.reverb,
+              compress: active.last.compress,
+            )
+          : _segChain(
+              gain: s.gainDb,
+              lowCut: s.lowCut,
+              bass: s.bassDb,
+              treble: s.trebleDb,
+              reverb: s.reverb,
+              compress: s.compress,
+            );
       parts.add('[$inLabel]atrim=start=${start.toStringAsFixed(3)}:end=${end.toStringAsFixed(3)}'
           ',asetpts=PTS-STARTPTS$chain[seg$idx]');
       idx++;
@@ -206,18 +243,7 @@ class Engine {
       }
       chain.write(',atempo=${tempo.toStringAsFixed(4)}');
     }
-    if (s.lowCut > 0) chain.write(',highpass=f=${s.lowCut.toStringAsFixed(0)}');
-    if (s.bassDb != 0) chain.write(',bass=g=${s.bassDb.toStringAsFixed(1)}:f=110');
-    if (s.trebleDb != 0) chain.write(',treble=g=${s.trebleDb.toStringAsFixed(1)}:f=3000');
-    if (s.compress) {
-      chain.write(',compand=attacks=0:decays=0.3:points=-80/-80|-25/-22|0/-6:soft-knee=6:gain=0:volume=0');
-    }
-    if (s.reverb > 0) {
-      final wet = (s.reverb / 100).clamp(0.0, 1.0);
-      chain.write(',aecho=0.8:${(0.6 + 0.4 * wet).toStringAsFixed(2)}:60|120:'
-          '${(0.3 * wet).toStringAsFixed(3)}|${(0.2 * wet).toStringAsFixed(3)}');
-    }
-    if (s.gainDb != 0) chain.write(',volume=${s.gainDb.toStringAsFixed(2)}dB');
+    // 增益/低切/高低频/压缩/混响已经按段算好了，这里只管会改时间轴的处理
     // 注意：空链不能补 ",anull"，否则整体变成 "[joined],anull" 会解析出一个空滤镜名
     final body = chain.toString();
     var clean = body.startsWith(',') ? body.substring(1) : body;

@@ -41,6 +41,8 @@ class _EditorPageState extends State<EditorPage> {
   bool _selDirty = false;
   Timer? _fxTimer;
   double? _resumeAt;
+  double _previewStart = 0;
+  String? _loadedSource;
 
   Track get track => task.tracks[trackIndex];
   TrackSettings get settings => track.settings;
@@ -51,12 +53,12 @@ class _EditorPageState extends State<EditorPage> {
     super.initState();
     _player.positionStream.listen((p) {
       if (!mounted) return;
-      setState(() => playhead = p.inMilliseconds / 1000.0);
+      setState(() => playhead = _previewStart + p.inMilliseconds / 1000.0);
     });
     _player.playerStateStream.listen((s) {
       if (!mounted) return;
       if (s.processingState == ProcessingState.completed) {
-        setState(() => playhead = 0);
+        setState(() => playhead = _previewStart);
       }
       setState(() {});
     });
@@ -81,6 +83,7 @@ class _EditorPageState extends State<EditorPage> {
   Future<void> _preview({bool selectionOnly = false, bool resume = false}) async {
     if (rendering) return;
     if (track.muted) {
+      if (_player.playing) await _player.pause();
       _toast('这轨现在是静音状态，点后面的喇叭打开再试听');
       return;
     }
@@ -98,6 +101,8 @@ class _EditorPageState extends State<EditorPage> {
       if (!selectionOnly && track.settings.isPristine && task.trimStart <= 0) {
         await _player.stop();
         await _player.setFilePath(track.path);
+        _previewStart = 0;
+        _loadedSource = track.path;
         _loadedPreview = track.path;
         _previewSig = sig;
         _player.play();
@@ -125,14 +130,16 @@ class _EditorPageState extends State<EditorPage> {
       }
       _loadedPreview = path;
       _previewSig = sig;
+      _previewStart = (start ?? 0).toDouble();
       await _player.stop();
       await _player.setFilePath(path);
+      _loadedSource = path;
       final resume = _resumeAt;
       if (resume != null && resume > 0.1) {
         final maxPos = _player.duration?.inMilliseconds != null
             ? _player.duration!.inMilliseconds / 1000.0 - 0.2
             : resume;
-        final target = resume > maxPos ? maxPos : resume;
+        var target = (resume - _previewStart).clamp(0.0, maxPos);
         if (target > 0) await _player.seek(Duration(milliseconds: (target * 1000).round()));
       }
       _player.play();
@@ -149,6 +156,10 @@ class _EditorPageState extends State<EditorPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 3)));
   }
 
+  bool get _hasSelection =>
+      (selEnd - selStart) >= 0.3 &&
+      (selStart > 0.02 || selEnd < duration - 0.02);
+
   bool get _isPlaying =>
       _player.playing && _player.processingState != ProcessingState.completed;
 
@@ -159,12 +170,12 @@ class _EditorPageState extends State<EditorPage> {
       return;
     }
     if (_player.processingState == ProcessingState.completed) {
-      await _player.seek(Duration.zero);
+      await _player.seek(Duration(milliseconds: (_previewStart * 1000).round()));
       _player.play();
       if (mounted) setState(() {});
       return;
     }
-    if (_selDirty && _selMode) {
+    if (_selDirty || _hasSelection) {
       await _preview(selectionOnly: true);
       return;
     }
@@ -172,6 +183,15 @@ class _EditorPageState extends State<EditorPage> {
         File(_loadedPreview!).existsSync() &&
         _previewSig == _sig();
     if (fresh) {
+      // 播放器里可能还挂着上一轨的文件，这里强制对齐
+      if (_loadedSource != _loadedPreview) {
+        await _player.stop();
+        await _player.setFilePath(_loadedPreview!);
+        _loadedSource = _loadedPreview;
+      }
+      if (_previewStart > 0) {
+        await _player.seek(Duration(milliseconds: (_previewStart * 1000).round()));
+      }
       _player.play();
       setState(() {});
     } else {
@@ -187,11 +207,13 @@ class _EditorPageState extends State<EditorPage> {
 
   /// 松手后再重渲染（新选区）并自动从选区起点播，不打断手感
   void _onSelDragEnd() {
+    final wasPlaying = _player.playing;
     setState(() {
       playhead = selStart;
       _selDirty = true;
+      _selMode = true;
     });
-    if (!_selMode) return;
+    if (!wasPlaying) return;
     _fxTimer?.cancel();
     _fxTimer = Timer(const Duration(milliseconds: 180), () {
       if (mounted) _preview(selectionOnly: true);
@@ -227,6 +249,29 @@ class _EditorPageState extends State<EditorPage> {
       selEnd = nb;
       _selDirty = true;
     });
+  }
+
+  void _applyRegionSnapshot() {
+    if (selEnd - selStart < 0.05) {
+      _toast('先在波形上拖出一段区间');
+      return;
+    }
+    setState(() {
+      settings.regions.removeWhere((r) => (r.start - selStart).abs() < 0.01 && (r.end - selEnd).abs() < 0.01);
+      settings.regions.add(RegionEdit(
+        start: selStart,
+        end: selEnd,
+        gainDb: settings.gainDb,
+        lowCut: settings.lowCut,
+        bassDb: settings.bassDb,
+        trebleDb: settings.trebleDb,
+        reverb: settings.reverb,
+        compress: settings.compress,
+      ));
+    });
+    _persist();
+    _scheduleFx();
+    _toast('这段（${_fmt(selStart)}-${_fmt(selEnd)}）已经按现在的参数单独生效，别的部分不变');
   }
 
   void _applyRegionGain(double gain) {
@@ -438,7 +483,8 @@ class _EditorPageState extends State<EditorPage> {
         peaks: iPeaks,
         role: 'inst',
       ));
-      track.muted = true;
+      // 原曲别跟着出声，把人声/伴奏的音量抢了；静音的是最前面那首整曲
+      if (task.tracks.isNotEmpty) task.tracks[0].muted = true;
       trackIndex = task.tracks.length - 2;
       selStart = 0;
       selEnd = task.tracks[trackIndex].duration;
@@ -681,9 +727,16 @@ class _EditorPageState extends State<EditorPage> {
                 selected: trackIndex == i,
                 selectedColor: const Color(0xFF22D3EE),
                 backgroundColor: const Color(0xFF16202A),
-                onSelected: (_) {
+                onSelected: (_) async {
+                  await _player.pause();
                   setState(() {
                     trackIndex = i;
+                    _loadedPreview = null;
+                    _previewSig = null;
+                    _loadedSource = null;
+                    _previewStart = 0;
+                    _selMode = false;
+                    _selDirty = true;
                     selStart = 0;
                     selEnd = task.tracks[i].duration;
                     playhead = 0;
@@ -735,9 +788,9 @@ class _EditorPageState extends State<EditorPage> {
         ),
         const SizedBox(width: 10),
         OutlinedButton.icon(
-          onPressed: rendering ? null : () => _preview(selectionOnly: true),
-          icon: const Icon(Icons.highlight_alt, size: 18),
-          label: const Text('试听选区'),
+          onPressed: rendering ? null : () => _preview(),
+          icon: const Icon(Icons.queue_music, size: 18),
+          label: const Text('试听全曲'),
         ),
         const Spacer(),
         if (rendering) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -775,7 +828,16 @@ class _EditorPageState extends State<EditorPage> {
                       if (cur.isNotEmpty) {
                         cur.first.gainDb = v;
                       } else if (selEnd - selStart > 0.05) {
-                        settings.regions.add(RegionEdit(start: selStart, end: selEnd, gainDb: v));
+                        settings.regions.add(RegionEdit(
+                          start: selStart,
+                          end: selEnd,
+                          gainDb: v,
+                          lowCut: settings.lowCut,
+                          bassDb: settings.bassDb,
+                          trebleDb: settings.trebleDb,
+                          reverb: settings.reverb,
+                          compress: settings.compress,
+                        ));
                       }
                     }),
                     onChangeEnd: (_) => _persist(),
@@ -789,6 +851,11 @@ class _EditorPageState extends State<EditorPage> {
                 OutlinedButton(
                   onPressed: () => _applyRegionGain(0),
                   child: const Text('归零', style: TextStyle(fontSize: 12)),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: _applyRegionSnapshot,
+                  child: const Text('把当前参数写进这段', style: TextStyle(fontSize: 12)),
                 ),
                 const SizedBox(width: 8),
                 if (active.isNotEmpty)
