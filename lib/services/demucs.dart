@@ -24,9 +24,13 @@ class Demucs {
   static const String _hf =
       'https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx';
 
+  /// 模型同时挂在 GitHub 发布页上（走你的加速镜像会快很多）
+  static const String _gh =
+      'https://github.com/luogen-vip/LogenAudioStudio/releases/download/v1.0.0-luogen.9/htdemucs_fp16weights.onnx';
+
   List<String> get _urls => [
-        'https://$mirror/https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx',
-        'https://$mirror/$_hf',
+        'https://$mirror/$_gh',
+        _gh,
         _hf,
       ];
 
