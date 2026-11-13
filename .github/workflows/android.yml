@@ -10,7 +10,7 @@ on:
 
 env:
   FLUTTER_VERSION: "3.41.6"
-  VERSION: "1.0.0-luogen.7"
+  VERSION: "1.0.0-luogen.8"
 
 jobs:
   build:

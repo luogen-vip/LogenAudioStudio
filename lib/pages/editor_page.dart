@@ -262,6 +262,7 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _separate() async {
     if (rendering) return;
+    final wasPlaying = _player.playing;
     setState(() {
       rendering = true;
       statusText = '正在分析频谱、分离人声和伴奏…（长歌要十几秒）';
@@ -306,7 +307,13 @@ class _EditorPageState extends State<EditorPage> {
         selEnd = task.tracks[trackIndex].duration;
       });
       await Repo.instance.touch();
-
+      _loadedPreview = null;
+      _previewSig = null;
+      if (wasPlaying) {
+        await _player.pause();
+      } else {
+        await _preview();
+      }
       _toast('分离完成：人声 + 伴奏已加入，原轨已静音。'
           '这是频谱法（重复伴奏当背景减掉），伴奏很干净的歌会分得不错，'
           '混响重、伴奏不重复的歌还会留残响');
