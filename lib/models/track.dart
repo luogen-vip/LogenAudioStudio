@@ -109,6 +109,7 @@ class Track {
   int sampleRate;
   int channels;
   double volume; // 混音时的轨道音量 0..2
+  double offsetMs; // 合成时的起点偏移（毫秒，可负）
   bool muted;
   TrackSettings settings;
   List<double> peaks; // 归一化 0..1
@@ -122,6 +123,7 @@ class Track {
     this.sampleRate = 44100,
     this.channels = 2,
     this.volume = 1.0,
+    this.offsetMs = 0,
     this.muted = false,
     TrackSettings? settings,
     List<double>? peaks,
@@ -137,6 +139,7 @@ class Track {
         'sampleRate': sampleRate,
         'channels': channels,
         'volume': volume,
+        'offsetMs': offsetMs,
         'muted': muted,
         'settings': settings.toJson(),
         'peaks': peaks,
@@ -151,6 +154,7 @@ class Track {
         sampleRate: (j['sampleRate'] as num?)?.toInt() ?? 44100,
         channels: (j['channels'] as num?)?.toInt() ?? 2,
         volume: (j['volume'] as num?)?.toDouble() ?? 1.0,
+        offsetMs: (j['offsetMs'] as num?)?.toDouble() ?? 0,
         muted: j['muted'] == true,
         settings: j['settings'] == null
             ? TrackSettings()

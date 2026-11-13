@@ -287,10 +287,21 @@ class Engine {
       } else {
         filters.write('[$i:a]anull[src$i];');
       }
+      // 起点偏移：人声往后推 / 往前挪，用来跟伴奏对齐
+      final off = active[i].offsetMs;
+      var label = 'src$i';
+      if (off > 1) {
+        filters.write('[$label]adelay=${off.round()}:all=1[o$i];');
+        label = 'o$i';
+      } else if (off < -1) {
+        filters.write('[$label]atrim=start=${(-off / 1000).toStringAsFixed(3)},'
+            'asetpts=PTS-STARTPTS[o$i];');
+        label = 'o$i';
+      }
       if (active[i].volume != 1.0) {
-        filters.write('[src$i]volume=${active[i].volume.toStringAsFixed(3)}[t$i];');
+        filters.write('[$label]volume=${active[i].volume.toStringAsFixed(3)}[t$i];');
       } else {
-        filters.write('[src$i]anull[t$i];');
+        filters.write('[$label]anull[t$i];');
       }
     }
     final inputs = List.generate(active.length, (i) => '[t$i]').join();

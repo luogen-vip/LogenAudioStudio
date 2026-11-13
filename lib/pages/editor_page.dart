@@ -37,6 +37,7 @@ class _EditorPageState extends State<EditorPage> {
   String? _loadedPreview;
   String? _previewSig;
   bool _selMode = false;
+  bool _selDirty = false;
   Timer? _fxTimer;
   double? _resumeAt;
 
@@ -76,10 +77,15 @@ class _EditorPageState extends State<EditorPage> {
 
   String _sig() => '${track.id}_${settings.signature}_${task.trimStart}_${task.trimEnd}'.hashCode.toString();
 
-  Future<void> _preview({bool selectionOnly = false}) async {
+  Future<void> _preview({bool selectionOnly = false, bool resume = false}) async {
     if (rendering) return;
+    if (track.muted) {
+      _toast('这轨现在是静音状态，点后面的喇叭打开再试听');
+      return;
+    }
     _selMode = selectionOnly;
-    final wasPlaying = _player.playing;
+    _selDirty = false;
+    final wasPlaying = resume && _player.playing;
     _resumeAt = wasPlaying ? _player.position.inMilliseconds / 1000.0 : null;
     final sig = selectionOnly ? '${_sig()}_sel_${selStart}_${selEnd}' : _sig();
     setState(() {
@@ -157,6 +163,10 @@ class _EditorPageState extends State<EditorPage> {
       if (mounted) setState(() {});
       return;
     }
+    if (_selDirty && _selMode) {
+      await _preview(selectionOnly: true);
+      return;
+    }
     final fresh = _loadedPreview != null &&
         File(_loadedPreview!).existsSync() &&
         _previewSig == _sig();
@@ -176,6 +186,10 @@ class _EditorPageState extends State<EditorPage> {
 
   /// 松手后再重渲染（新选区）并自动从选区起点播，不打断手感
   void _onSelDragEnd() {
+    setState(() {
+      playhead = selStart;
+      _selDirty = true;
+    });
     if (!_selMode) return;
     _fxTimer?.cancel();
     _fxTimer = Timer(const Duration(milliseconds: 180), () {
@@ -188,7 +202,7 @@ class _EditorPageState extends State<EditorPage> {
     _fxTimer?.cancel();
     if (!_player.playing) return;
     _fxTimer = Timer(const Duration(milliseconds: 700), () {
-      if (mounted && _player.playing) _preview(selectionOnly: _selMode);
+      if (mounted && _player.playing) _preview(selectionOnly: _selMode, resume: true);
     });
   }
 
@@ -204,9 +218,13 @@ class _EditorPageState extends State<EditorPage> {
   }
 
   void _setSelection(double a, double b) {
+    final na = math.max(0.0, a);
+    final nb = math.min(duration, b);
+    if ((na - selStart).abs() < 0.01 && (nb - selEnd).abs() < 0.01) return;
     setState(() {
-      selStart = math.max(0, a);
-      selEnd = math.min(duration, b);
+      selStart = na;
+      selEnd = nb;
+      _selDirty = true;
     });
   }
 
@@ -235,7 +253,7 @@ class _EditorPageState extends State<EditorPage> {
     setState(() => settings.reset());
     _loadedPreview = null;
     _persist();
-    _toast('已恢复默认（原始音频参数）');
+    _toast('已恢复当前这轨的默认参数（别的轨不受影响）');
   }
 
   void _persist() {
@@ -329,7 +347,45 @@ class _EditorPageState extends State<EditorPage> {
     }
   }
 
-  Future<void> _export({required bool mixAll, required ExportConfig config}) async {
+  Future<void> _previewMix() async {
+    if (rendering) return;
+    final tracks = task.tracks.where((t) => !t.muted).toList();
+    if (tracks.isEmpty) {
+      _toast('所有轨都静音了，没有可播放的音轨');
+      return;
+    }
+    setState(() {
+      rendering = true;
+      statusText = '正在渲染混音预览…';
+    });
+    try {
+      final dir = await _cacheDir();
+      final path = '$dir/mix_${DateTime.now().millisecondsSinceEpoch}.wav';
+      final err = await Engine.instance.renderMix(
+        tracks: tracks,
+        outPath: path,
+        config: const ExportConfig(format: 'wav'),
+        start: task.trimStart,
+        end: task.effectiveEnd,
+      );
+      if (err != null) {
+        _toast('混音试听失败：$err');
+        return;
+      }
+      _loadedPreview = path;
+      _previewSig = 'mix';
+      await _player.stop();
+      await _player.setFilePath(path);
+      _player.play();
+      if (mounted) setState(() => statusText = null);
+    } catch (e) {
+      _toast('混音试听异常：$e');
+    } finally {
+      if (mounted) setState(() => rendering = false);
+    }
+  }
+
+  Future<void> _export({required List<Track> tracks, required ExportConfig config}) async {
     setState(() {
       exporting = true;
       exportProgress = 0;
@@ -337,13 +393,13 @@ class _EditorPageState extends State<EditorPage> {
     try {
       final dir = await Storage.instance.outputDir();
       final stamp = DateTime.now();
-      final suffix = mixAll ? 'mix' : track.role;
+      final suffix = tracks.length > 1 ? 'mix' : tracks.first.role;
       final name = '${_safe(task.title)}_${suffix}_${stamp.month}${stamp.day}_${stamp.hour}${stamp.minute}${stamp.second}.${config.format}';
       final out = '${dir.path}/$name';
       String? err;
-      if (mixAll) {
+      if (tracks.length > 1) {
         err = await Engine.instance.renderMix(
-          tracks: task.tracks,
+          tracks: tracks,
           outPath: out,
           config: config,
           start: task.trimStart,
@@ -351,7 +407,7 @@ class _EditorPageState extends State<EditorPage> {
         );
       } else {
         err = await Engine.instance.renderTrack(
-          track: track,
+          track: tracks.first,
           outPath: out,
           config: config,
           start: task.trimStart,
@@ -440,7 +496,8 @@ class _EditorPageState extends State<EditorPage> {
             _sliderRow('低切（去低频浑浊）', settings.lowCut, 0, 400, 'Hz', (v) => setState(() => settings.lowCut = v)),
             _sliderRow('低频厚度', settings.bassDb, -12, 12, 'dB', (v) => setState(() => settings.bassDb = v)),
             _sliderRow('高频亮度', settings.trebleDb, -12, 12, 'dB', (v) => setState(() => settings.trebleDb = v)),
-            _sliderRow('混响', settings.reverb, 0, 100, '%', (v) => setState(() => settings.reverb = v)),
+            _sliderRow('混响（0-30轻 / 30-60房间 / 60-85厅堂 / 85+大混响）', settings.reverb, 0, 100, '%',
+                (v) => setState(() => settings.reverb = v)),
             _sliderRow('变调（旋律升降，速度不变）', settings.pitch.toDouble(), -12, 12, '半音',
                 (v) => setState(() => settings.pitch = v.round())),
             _sliderRow('速度', settings.speed, 0.5, 2.0, 'x', (v) => setState(() => settings.speed = v)),
@@ -452,7 +509,9 @@ class _EditorPageState extends State<EditorPage> {
             ),
             const SizedBox(height: 4),
             Text(
-              settings.isPristine ? '当前就是原始音频参数' : '已改动，点「试听」听真实效果',
+              settings.isPristine
+                  ? '当前就是原始音频参数'
+                  : '已改动，点「试听」听真实效果（播放中调节，松手约 0.7 秒后自动按新参数重放）',
               style: const TextStyle(fontSize: 12, color: Colors.white38),
             ),
             const SizedBox(height: 16),
@@ -747,6 +806,9 @@ class _EditorPageState extends State<EditorPage> {
                       icon: Icon(task.tracks[i].muted ? Icons.volume_off : Icons.volume_up, size: 18),
                       onPressed: () {
                         setState(() => task.tracks[i].muted = !task.tracks[i].muted);
+                        if (task.tracks[i].muted && i == trackIndex && _player.playing) {
+                          _player.pause();
+                        }
                         _persist();
                       },
                     ),
@@ -755,9 +817,53 @@ class _EditorPageState extends State<EditorPage> {
               ),
             if (task.tracks.length > 1)
               Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: rendering ? null : _previewMix,
+                        icon: const Icon(Icons.graphic_eq, size: 18),
+                        label: const Text('试听混音（当前参数）', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (task.tracks.length > 1)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Text('这轨起点偏移', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                        const Spacer(),
+                        Text('${track.offsetMs.round()} ms',
+                            style: const TextStyle(fontSize: 11, color: Color(0xFF22D3EE))),
+                      ],
+                    ),
+                    Slider(
+                      value: track.offsetMs.clamp(-3000, 3000),
+                      min: -3000,
+                      max: 3000,
+                      onChanged: (v) => setState(() => track.offsetMs = v),
+                      onChangeEnd: (_) => _persist(),
+                    ),
+                  ],
+                ),
+              ),
+            if (task.tracks.length > 1)
+              Padding(
                 padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
                 child: FilledButton.icon(
-                  onPressed: exporting ? null : () => _export(mixAll: true, config: const ExportConfig(format: 'wav')),
+                  onPressed: exporting
+                      ? null
+                      : () => _export(
+                            tracks: task.tracks.where((t) => !t.muted).toList(),
+                            config: const ExportConfig(format: 'wav'),
+                          ),
                   icon: const Icon(Icons.merge_type, size: 18),
                   label: const Text('直接合成一首（默认 WAV）'),
                 ),
@@ -781,7 +887,10 @@ class _EditorPageState extends State<EditorPage> {
     int sr = 44100;
     int channels = 2;
     int bitrate = 192;
-    bool mixAll = task.tracks.length > 1;
+    final Set<int> picked = {
+      for (int i = 0; i < task.tracks.length; i++)
+        if (!task.tracks[i].muted) i,
+    };
 
     showModalBottomSheet(
       context: context,
@@ -864,22 +973,42 @@ class _EditorPageState extends State<EditorPage> {
                   ),
                 ],
                 const SizedBox(height: 12),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('多轨合成（人声 + 伴奏）', style: TextStyle(fontSize: 13)),
-                  value: mixAll && task.tracks.length > 1,
-                  onChanged: task.tracks.length > 1 ? (v) => setSheet(() => mixAll = v) : null,
+                const Text('导出哪些轨（选 1 轨就是单轨导出，选多轨就是合成）',
+                    style: TextStyle(fontSize: 12, color: Colors.white54)),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (int i = 0; i < task.tracks.length; i++)
+                      FilterChip(
+                        label: Text(
+                          '${_roleName(task.tracks[i].role)}${task.tracks[i].muted ? '（静音）' : ''}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        selected: picked.contains(i),
+                        selectedColor: const Color(0xFF22D3EE),
+                        backgroundColor: const Color(0xFF16202A),
+                        onSelected: (v) => setSheet(() {
+                          if (v) {
+                            picked.add(i);
+                          } else {
+                            picked.remove(i);
+                          }
+                        }),
+                      ),
+                  ],
                 ),
                 const SizedBox(height: 10),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
-                    onPressed: exporting
+                    onPressed: exporting || picked.isEmpty
                         ? null
                         : () {
                             Navigator.pop(ctx);
                             _export(
-                              mixAll: mixAll && task.tracks.length > 1,
+                              tracks: picked.map((i) => task.tracks[i]).toList(),
                               config: ExportConfig(
                                 format: format,
                                 sampleRate: sr,
