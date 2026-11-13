@@ -379,7 +379,7 @@ class _EditorPageState extends State<EditorPage> {
       }
 
       final dir = '${Repo.instance.audioDir.path}/${task.id}';
-      setState(() => statusText = 'AI 正在分离人声和伴奏 0%（长歌要几分钟，别退出）…');
+      setState(() => statusText = 'AI 正在加载模型（第一次要十几秒，别退出）…');
       final res = await Engine.instance.separateModel(
         track,
         dir,
@@ -387,7 +387,9 @@ class _EditorPageState extends State<EditorPage> {
         onProgress: (p) {
           if (!mounted) return;
           setState(() => statusText =
-              'AI 正在分离 ${(p * 100).toStringAsFixed(0)}%（长歌要几分钟，别退出）…');
+              p < 0.05
+                  ? 'AI 正在加载模型（第一次要十几秒，别退出）…'
+                  : 'AI 正在分离 ${(p * 100).toStringAsFixed(0)}%（长歌要几分钟，别退出）…');
         },
       );
       if (res['error'] != null) {

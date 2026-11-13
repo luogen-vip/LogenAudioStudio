@@ -47,21 +47,23 @@ public class DemucsRunner {
         return w;
     }
 
-    private static float[] readRaw(String path) throws IOException {
-        File f = new File(path);
-        int count = (int) (f.length() / 4);
-        float[] out = new float[count];
-        try (java.io.DataInputStream in = new java.io.DataInputStream(new FileInputStream(f))) {
-            int i = 0;
-            while (i < count) {
-                try {
-                    out[i++] = Float.intBitsToFloat(Integer.reverseBytes(in.readInt()));
-                } catch (EOFException e) {
-                    break;
-                }
-            }
+    /** 只读一块，不把整首歌读进内存（长歌会 OOM） */
+    private static void readChunk(java.io.RandomAccessFile raf, int startSample, int frames,
+                                  float[] out, int ch) throws IOException {
+        java.util.Arrays.fill(out, 0f);
+        long pos = (long) startSample * ch * 4L;
+        long len = (long) frames * ch * 4L;
+        raf.seek(pos);
+        byte[] buf = new byte[(int) len];
+        int got = 0;
+        while (got < len) {
+            int r = raf.read(buf, got, (int) len - got);
+            if (r <= 0) break;
+            got += r;
         }
-        return out;
+        ByteBuffer bb = ByteBuffer.wrap(buf, 0, got).order(ByteOrder.LITTLE_ENDIAN);
+        int n = got / 4;
+        for (int i = 0; i < n; i++) out[i] = bb.getFloat();
     }
 
     private static void writeFloats(OutputStream os, float[] data, int len) throws IOException {
@@ -72,15 +74,19 @@ public class DemucsRunner {
 
     public static void separate(String modelPath, String mixPath, String vocalPath,
                                 String instPath, int total, Progress cb) throws Exception {
-        float[] mix = readRaw(mixPath);
-        int available = mix.length / CH;
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(mixPath, "r");
+        int available = (int) (raf.length() / (CH * 4L));
         if (total <= 0 || total > available) total = available;
+        if (cb != null) cb.onProgress(0.01);
 
         OrtEnvironment env = OrtEnvironment.getEnvironment();
         OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
-        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
-        opts.setIntraOpNumThreads(Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
+        // 手机上别开 ALL_OPT：两万多个节点会把内存和启动时间撑爆
+        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+        opts.setIntraOpNumThreads(2);
+        opts.setInterOpNumThreads(1);
         OrtSession session = env.createSession(modelPath, opts);
+        if (cb != null) cb.onProgress(0.03);
 
         float[] win = window();
         float[][] acc = new float[CH][N];
@@ -95,11 +101,12 @@ public class DemucsRunner {
             for (int ci = 0; ci < chunks; ci++) {
                 int st = ci * STRIDE;
                 int cl = Math.min(N, total - st);
+                float[] interleaved = new float[CH * N];
+                readChunk(raf, st, cl, interleaved, CH);
                 FloatBuffer fb = ByteBuffer.allocateDirect(CH * N * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
                 for (int c = 0; c < CH; c++) {
                     for (int k = 0; k < N; k++) {
-                        int idx = (st + k) * CH + c;
-                        float v = (k < cl && idx < mix.length) ? mix[idx] : 0f;
+                        float v = interleaved[k * CH + c];
                         fb.put(c * N + k, v);
                         curMix[c][k] = v;
                     }
@@ -156,6 +163,7 @@ public class DemucsRunner {
             }
             ok = true;
         } finally {
+            try { raf.close(); } catch (IOException ignore) {}
             session.close();
             if (!ok) {
                 new File(vocalPath).delete();
