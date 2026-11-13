@@ -53,4 +53,7 @@ flutter {
 
 dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
+    implementation(files("libs/JTransforms-3.1.jar"))
+    implementation(files("libs/JLargeArrays-1.6.jar"))
+    implementation(files("libs/commons-math3-3.6.1.jar"))
 }

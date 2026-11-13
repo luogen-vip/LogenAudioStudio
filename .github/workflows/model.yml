@@ -11,12 +11,12 @@ jobs:
     steps:
       - name: Download model
         run: |
-          curl -fL --retry 3 -o htdemucs_fp16weights.onnx \
-            https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx
-          ls -lh htdemucs_fp16weights.onnx
+          curl -fL --retry 3 -o UVR-MDX-NET-Voc_FT.onnx \
+            https://huggingface.co/aaatmy/uvr-mdx-net-onnx/resolve/main/UVR-MDX-NET-Voc_FT.onnx
+          ls -lh UVR-MDX-NET-Voc_FT.onnx
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload v1.0.0-luogen.9 htdemucs_fp16weights.onnx --clobber --repo luogen-vip/LogenAudioStudio
+          gh release upload v1.0.0-luogen.9 UVR-MDX-NET-Voc_FT.onnx --clobber --repo luogen-vip/LogenAudioStudio

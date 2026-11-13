@@ -284,7 +284,7 @@ class _EditorPageState extends State<EditorPage> {
             ListTile(
               leading: const Icon(Icons.auto_awesome, color: Color(0xFF57D9C3)),
               title: const Text('AI 模型分离（推荐）', style: TextStyle(color: Colors.white)),
-              subtitle: const Text('Demucs 神经网络，人声只有人声、伴奏只有伴奏，混响重也能分；首次要下 158MB 模型，之后离线可用',
+              subtitle: const Text('Demucs 神经网络，人声只有人声、伴奏只有伴奏，混响重也能分；首次要下 64MB 模型，之后离线可用',
                   style: TextStyle(color: Colors.white70, fontSize: 12)),
               onTap: () => Navigator.pop(ctx, true),
             ),
@@ -349,7 +349,7 @@ class _EditorPageState extends State<EditorPage> {
             backgroundColor: const Color(0xFF16181D),
             title: const Text('要先下模型', style: TextStyle(color: Colors.white)),
             content: const Text(
-              'AI 分离用的是 Demucs 官方模型（fp16 权重版），约 158MB。\n\n'
+              'AI 分离用的是 UVR 的 MDX-Net 人声模型，约 64MB。\n\n'
               '下载一次就存在手机里，以后离线也能用。建议连 WiFi，下到一半别退出，'
               '断了重新点会接着下。',
               style: TextStyle(color: Colors.white70, height: 1.5),
@@ -364,12 +364,12 @@ class _EditorPageState extends State<EditorPage> {
 
         setState(() {
           rendering = true;
-          statusText = '正在下载 AI 模型 0%（约 158MB，建议 WiFi）…';
+          statusText = '正在下载 AI 模型 0%（约 64MB，建议 WiFi）…';
         });
         await Demucs.instance.download(onProgress: (p) {
           if (!mounted) return;
           setState(() => statusText =
-              '正在下载 AI 模型 ${(p * 100).toStringAsFixed(0)}%（约 158MB，别退出）…');
+              '正在下载 AI 模型 ${(p * 100).toStringAsFixed(0)}%（约 64MB，断了会自动接着下）…');
         });
       } else {
         setState(() {

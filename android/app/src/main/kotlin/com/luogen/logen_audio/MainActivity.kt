@@ -42,6 +42,32 @@ class MainActivity : FlutterActivity() {
                         }
                     }.start()
                 }
+                "separateMdx" -> {
+                    val model = call.argument<String>("model")
+                    val mix = call.argument<String>("mix")
+                    val vocal = call.argument<String>("vocal")
+                    val inst = call.argument<String>("inst")
+                    val samples = call.argument<Int>("samples") ?: 0
+                    if (model == null || mix == null || vocal == null || inst == null) {
+                        result.error("bad_args", "参数不全", null)
+                        return@setMethodCallHandler
+                    }
+                    Thread {
+                        try {
+                            MdxRunner.run(model, mix, vocal, inst, samples) { p ->
+                                main.post {
+                                    try {
+                                        ch.invokeMethod("progress", p)
+                                    } catch (_: Exception) {
+                                    }
+                                }
+                            }
+                            main.post { result.success(null) }
+                        } catch (t: Throwable) {
+                            main.post { result.error("mdx_fail", t.message ?: t.toString(), null) }
+                        }
+                    }.start()
+                }
                 else -> result.notImplemented()
             }
         }
