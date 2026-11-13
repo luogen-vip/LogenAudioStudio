@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -299,7 +300,7 @@ class Engine {
       filters.write('[mixed]atrim=start=${start.toStringAsFixed(3)}:$e,'
           'asetpts=PTS-STARTPTS[out]');
     } else {
-      filters.write('[mixed]anull[out]');
+      filters.write(';[mixed]anull[out]');
     }
 
     args.addAll(['-filter_complex', filters.toString(), '-map', '[out]', '-vn']);
@@ -384,27 +385,34 @@ class Engine {
       if (v < -1) v = -1;
       int16[i] = (v * 32767).round();
     }
-    final header = ByteData(44);
     final byteLen = int16.length * 2;
-    header.setUint32(0, 0x52494646, Endian.little); // RIFF
-    header.setUint32(4, 36 + byteLen, Endian.little);
-    header.setUint32(8, 0x57415645, Endian.little); // WAVE
-    header.setUint32(12, 0x666d7420, Endian.little); // fmt
-    header.setUint32(16, 16, Endian.little);
-    header.setUint16(20, 1, Endian.little);
-    header.setUint16(22, 1, Endian.little);
-    header.setUint32(24, sampleRate, Endian.little);
-    header.setUint32(28, sampleRate * 2, Endian.little);
-    header.setUint16(32, 2, Endian.little);
-    header.setUint16(34, 16, Endian.little);
-    header.setUint32(36, 0x64617461, Endian.little); // data
-    header.setUint32(40, byteLen, Endian.little);
+    final b = BytesBuilder();
+    void tag(String s) => b.add(ascii.encode(s));
+    void u32(int v) {
+      final d = ByteData(4)..setUint32(0, v, Endian.little);
+      b.add(d.buffer.asUint8List());
+    }
 
-    final f = File(path);
-    final sink = f.openSync(mode: FileMode.write);
-    sink.writeFromSync(header.buffer.asUint8List());
-    sink.writeFromSync(int16.buffer.asUint8List());
-    sink.closeSync();
+    void u16(int v) {
+      final d = ByteData(2)..setUint16(0, v, Endian.little);
+      b.add(d.buffer.asUint8List());
+    }
+
+    tag('RIFF');
+    u32(36 + byteLen);
+    tag('WAVE');
+    tag('fmt ');
+    u32(16);
+    u16(1);
+    u16(1);
+    u32(sampleRate);
+    u32(sampleRate * 2);
+    u16(2);
+    u16(16);
+    tag('data');
+    u32(byteLen);
+    b.add(int16.buffer.asUint8List());
+    File(path).writeAsBytesSync(b.toBytes());
   }
 
   /// 快速人声/伴奏分离：中置声道提取 + 反相抵消（立体声歌曲用，秒出结果）

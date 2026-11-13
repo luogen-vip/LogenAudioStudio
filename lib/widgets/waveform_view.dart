@@ -10,6 +10,8 @@ class WaveformView extends StatefulWidget {
   final double playhead;
   final void Function(double start, double end) onSelection;
   final void Function(double seconds) onSeek;
+  final VoidCallback? onDragStart;
+  final VoidCallback? onDragEnd;
 
   const WaveformView({
     super.key,
@@ -20,6 +22,8 @@ class WaveformView extends StatefulWidget {
     required this.playhead,
     required this.onSelection,
     required this.onSeek,
+    this.onDragStart,
+    this.onDragEnd,
   });
 
   @override
@@ -49,7 +53,9 @@ class _WaveformViewState extends State<WaveformView> {
         behavior: HitTestBehavior.opaque,
         onTapDown: (d) => widget.onSeek(_xToTime(d.localPosition.dx, width)),
         onHorizontalDragStart: (d) {
+          widget.onDragStart?.call();
           final x = d.localPosition.dx;
+          final phx = widget.playhead / dur * width;
           // 抓哪根线，就只动那根线；抓选区中间，整体平移；抓空白，重新拉选区
           final dStart = (x - sx).abs();
           final dEnd = (x - ex).abs();
@@ -59,6 +65,9 @@ class _WaveformViewState extends State<WaveformView> {
           } else if (dEnd < _handleZone) {
             _mode = _DragMode.endEdge;
             _anchor = widget.selStart;
+          } else if ((x - phx).abs() < 14 && x > sx && x < ex) {
+            _mode = _DragMode.seek;
+            _anchor = _xToTime(x, width);
           } else if (x > sx && x < ex) {
             _mode = _DragMode.moveAll;
             _anchor = _xToTime(x, width);
@@ -89,11 +98,17 @@ class _WaveformViewState extends State<WaveformView> {
             case _DragMode.newSelection:
               widget.onSelection(math.min(_anchor, t), math.max(_anchor, t));
               break;
+            case _DragMode.seek:
+              widget.onSeek(t);
+              break;
             case _DragMode.none:
               break;
           }
         },
-        onHorizontalDragEnd: (_) => _mode = _DragMode.none,
+        onHorizontalDragEnd: (_) {
+          _mode = _DragMode.none;
+          widget.onDragEnd?.call();
+        },
         child: CustomPaint(
           painter: _WavePainter(
             peaks: widget.peaks,
@@ -109,7 +124,7 @@ class _WaveformViewState extends State<WaveformView> {
   }
 }
 
-enum _DragMode { none, startEdge, endEdge, moveAll, newSelection }
+enum _DragMode { none, startEdge, endEdge, moveAll, newSelection, seek }
 
 class _WavePainter extends CustomPainter {
   final List<double> peaks;

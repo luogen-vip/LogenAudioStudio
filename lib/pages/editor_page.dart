@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -35,6 +36,9 @@ class _EditorPageState extends State<EditorPage> {
   final AudioPlayer _player = AudioPlayer();
   String? _loadedPreview;
   String? _previewSig;
+  bool _selMode = false;
+  Timer? _fxTimer;
+  double? _resumeAt;
 
   Track get track => task.tracks[trackIndex];
   TrackSettings get settings => track.settings;
@@ -74,6 +78,9 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _preview({bool selectionOnly = false}) async {
     if (rendering) return;
+    _selMode = selectionOnly;
+    final wasPlaying = _player.playing;
+    _resumeAt = wasPlaying ? _player.position.inMilliseconds / 1000.0 : null;
     final sig = selectionOnly ? '${_sig()}_sel_${selStart}_${selEnd}' : _sig();
     setState(() {
       rendering = true;
@@ -113,6 +120,14 @@ class _EditorPageState extends State<EditorPage> {
       _previewSig = sig;
       await _player.stop();
       await _player.setFilePath(path);
+      final resume = _resumeAt;
+      if (resume != null && resume > 0.1) {
+        final maxPos = _player.duration?.inMilliseconds != null
+            ? _player.duration!.inMilliseconds / 1000.0 - 0.2
+            : resume;
+        final target = resume > maxPos ? maxPos : resume;
+        if (target > 0) await _player.seek(Duration(milliseconds: (target * 1000).round()));
+      }
       _player.play();
       if (mounted) setState(() => statusText = null);
     } catch (e) {
@@ -127,9 +142,18 @@ class _EditorPageState extends State<EditorPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 3)));
   }
 
+  bool get _isPlaying =>
+      _player.playing && _player.processingState != ProcessingState.completed;
+
   Future<void> _pause() async {
-    if (_player.playing) {
+    if (_isPlaying) {
       await _player.pause();
+      if (mounted) setState(() {});
+      return;
+    }
+    if (_player.processingState == ProcessingState.completed) {
+      await _player.seek(Duration.zero);
+      _player.play();
       if (mounted) setState(() {});
       return;
     }
@@ -142,6 +166,30 @@ class _EditorPageState extends State<EditorPage> {
     } else {
       await _preview();
     }
+  }
+
+  void _onSelDragStart() {
+    if (_player.playing) {
+      _player.pause();
+    }
+  }
+
+  /// 松手后再重渲染（新选区）并自动从选区起点播，不打断手感
+  void _onSelDragEnd() {
+    if (!_selMode) return;
+    _fxTimer?.cancel();
+    _fxTimer = Timer(const Duration(milliseconds: 180), () {
+      if (mounted) _preview(selectionOnly: true);
+    });
+  }
+
+  /// 参数改了：正在放的话，停一下再按新参数重渲染，然后从原位置接着放
+  void _scheduleFx() {
+    _fxTimer?.cancel();
+    if (!_player.playing) return;
+    _fxTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted && _player.playing) _preview(selectionOnly: _selMode);
+    });
   }
 
   Future<void> _seek(double seconds) async {
@@ -366,6 +414,8 @@ class _EditorPageState extends State<EditorPage> {
               playhead: playhead,
               onSelection: _setSelection,
               onSeek: _seek,
+              onDragStart: _onSelDragStart,
+              onDragEnd: _onSelDragEnd,
             ),
             const SizedBox(height: 8),
             _timeRow(),
@@ -488,8 +538,8 @@ class _EditorPageState extends State<EditorPage> {
       children: [
         FilledButton.icon(
           onPressed: rendering ? null : _pause,
-          icon: Icon(_player.playing ? Icons.pause : Icons.play_arrow, size: 20),
-          label: Text(_player.playing ? '暂停' : '试听'),
+          icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow, size: 20),
+          label: Text(_isPlaying ? '暂停' : '试听'),
         ),
         const SizedBox(width: 10),
         OutlinedButton.icon(
@@ -595,7 +645,10 @@ class _EditorPageState extends State<EditorPage> {
           value: value.clamp(min, max),
           min: min,
           max: max,
-          onChanged: (v) => setState(() => onChanged(v)),
+          onChanged: (v) {
+            setState(() => onChanged(v));
+            _scheduleFx();
+          },
           onChangeEnd: (_) => _persist(),
         ),
       ],
