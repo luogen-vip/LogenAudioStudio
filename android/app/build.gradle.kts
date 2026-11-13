@@ -43,6 +43,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
+            // FFT 用的第三方 jar 有可选依赖，R8 全量混淆会报缺类；关掉压缩换稳定
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
