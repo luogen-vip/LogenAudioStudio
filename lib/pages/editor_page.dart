@@ -8,6 +8,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../models/track.dart';
+import '../services/demucs.dart';
 import '../services/engine.dart';
 import '../services/importer.dart';
 import '../services/repo.dart';
@@ -262,6 +263,53 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _separate() async {
     if (rendering) return;
+    final useModel = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: const Color(0xFF16181D),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 16, 18, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('怎么分？',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.auto_awesome, color: Color(0xFF57D9C3)),
+              title: const Text('AI 模型分离（推荐）', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Demucs 神经网络，人声只有人声、伴奏只有伴奏，混响重也能分；首次要下 158MB 模型，之后离线可用',
+                  style: TextStyle(color: Colors.white70, fontSize: 12)),
+              onTap: () => Navigator.pop(ctx, true),
+            ),
+            ListTile(
+              leading: const Icon(Icons.speed, color: Colors.white54),
+              title: const Text('快速分离（频谱法）'),
+              subtitle: const Text('十几秒出结果，占内存小；伴奏重复度高的歌还行，混响重会残留',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              onTap: () => Navigator.pop(ctx, false),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (useModel == null) return;
+    if (useModel) {
+      await _separateWithModel();
+    } else {
+      await _separateFast();
+    }
+  }
+
+  Future<void> _separateFast() async {
+    if (rendering) return;
     final wasPlaying = _player.playing;
     setState(() {
       rendering = true;
@@ -274,56 +322,132 @@ class _EditorPageState extends State<EditorPage> {
         _toast('分离失败：${res['error']}');
         return;
       }
-      final vocalPath = res['vocal']!;
-      final instPath = res['inst']!;
-      final vInfo = await Engine.instance.probe(vocalPath);
-      final iInfo = await Engine.instance.probe(instPath);
-      final vPeaks = await Engine.instance.peaks(vocalPath);
-      final iPeaks = await Engine.instance.peaks(instPath);
-      setState(() {
-        task.tracks.add(Track(
-          id: '${DateTime.now().microsecondsSinceEpoch}_v',
-          name: vocalPath.split('/').last,
-          path: vocalPath,
-          duration: vInfo.duration,
-          sampleRate: vInfo.sampleRate,
-          channels: vInfo.channels,
-          peaks: vPeaks,
-          role: 'vocal',
-        ));
-        task.tracks.add(Track(
-          id: '${DateTime.now().microsecondsSinceEpoch}_i',
-          name: instPath.split('/').last,
-          path: instPath,
-          duration: iInfo.duration,
-          sampleRate: iInfo.sampleRate,
-          channels: iInfo.channels,
-          peaks: iPeaks,
-          role: 'inst',
-        ));
-        track.muted = true;
-        trackIndex = task.tracks.length - 2;
-        selStart = 0;
-        selEnd = task.tracks[trackIndex].duration;
-      });
-      await Repo.instance.touch();
-      _loadedPreview = null;
-      _previewSig = null;
-      if (wasPlaying) {
-        await _player.pause();
-      } else {
-        await _preview();
-      }
-      _toast('分离完成：人声 + 伴奏已加入，原轨已静音。'
-          '这是频谱法（重复伴奏当背景减掉），伴奏很干净的歌会分得不错，'
-          '混响重、伴奏不重复的歌还会留残响');
+      await _applySeparated(res, wasPlaying: wasPlaying);
+      _toast('快速分离完成（频谱法）：伴奏重复度高的歌效果不错，混响重的歌还会有残留。'
+          '想要彻底分开，下次选「AI 模型分离」。');
     } catch (e) {
       _toast('分离异常：$e');
     } finally {
-      if (mounted) setState(() {
-        rendering = false;
-        statusText = null;
-      });
+      if (mounted) {
+        setState(() {
+          rendering = false;
+          statusText = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _separateWithModel() async {
+    if (rendering) return;
+    final wasPlaying = _player.playing;
+    try {
+      final modelPath = await Demucs.instance.modelPath();
+      if (!await Demucs.instance.ready()) {
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF16181D),
+            title: const Text('要先下模型', style: TextStyle(color: Colors.white)),
+            content: const Text(
+              'AI 分离用的是 Demucs 官方模型（fp16 权重版），约 158MB。\n\n'
+              '下载一次就存在手机里，以后离线也能用。建议连 WiFi，下到一半别退出，'
+              '断了重新点会接着下。',
+              style: TextStyle(color: Colors.white70, height: 1.5),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('先不下')),
+              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('开始下载')),
+            ],
+          ),
+        );
+        if (ok != true) return;
+
+        setState(() {
+          rendering = true;
+          statusText = '正在下载 AI 模型 0%（约 158MB，建议 WiFi）…';
+        });
+        await Demucs.instance.download(onProgress: (p) {
+          if (!mounted) return;
+          setState(() => statusText =
+              '正在下载 AI 模型 ${(p * 100).toStringAsFixed(0)}%（约 158MB，别退出）…');
+        });
+      } else {
+        setState(() {
+          rendering = true;
+          statusText = 'AI 正在分离…';
+        });
+      }
+
+      final dir = '${Repo.instance.audioDir.path}/${task.id}';
+      setState(() => statusText = 'AI 正在分离人声和伴奏 0%（长歌要几分钟，别退出）…');
+      final res = await Engine.instance.separateModel(
+        track,
+        dir,
+        modelPath,
+        onProgress: (p) {
+          if (!mounted) return;
+          setState(() => statusText =
+              'AI 正在分离 ${(p * 100).toStringAsFixed(0)}%（长歌要几分钟，别退出）…');
+        },
+      );
+      if (res['error'] != null) {
+        _toast('AI 分离失败：${res['error']}，可以先用快速分离顶上');
+        return;
+      }
+      await _applySeparated(res, wasPlaying: wasPlaying);
+      _toast('AI 分离完成：人声是纯人声，伴奏是纯伴奏，已经加进轨道列表。');
+    } catch (e) {
+      _toast('AI 分离没跑通：$e（模型路径或内存问题，先用快速分离顶上）');
+    } finally {
+      if (mounted) {
+        setState(() {
+          rendering = false;
+          statusText = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _applySeparated(Map<String, String> res, {required bool wasPlaying}) async {
+    final vocalPath = res['vocal']!;
+    final instPath = res['inst']!;
+    final vInfo = await Engine.instance.probe(vocalPath);
+    final iInfo = await Engine.instance.probe(instPath);
+    final vPeaks = await Engine.instance.peaks(vocalPath);
+    final iPeaks = await Engine.instance.peaks(instPath);
+    setState(() {
+      task.tracks.add(Track(
+        id: '${DateTime.now().microsecondsSinceEpoch}_v',
+        name: vocalPath.split('/').last,
+        path: vocalPath,
+        duration: vInfo.duration,
+        sampleRate: vInfo.sampleRate,
+        channels: vInfo.channels,
+        peaks: vPeaks,
+        role: 'vocal',
+      ));
+      task.tracks.add(Track(
+        id: '${DateTime.now().microsecondsSinceEpoch}_i',
+        name: instPath.split('/').last,
+        path: instPath,
+        duration: iInfo.duration,
+        sampleRate: iInfo.sampleRate,
+        channels: iInfo.channels,
+        peaks: iPeaks,
+        role: 'inst',
+      ));
+      track.muted = true;
+      trackIndex = task.tracks.length - 2;
+      selStart = 0;
+      selEnd = task.tracks[trackIndex].duration;
+      _loadedPreview = null;
+      _previewSig = null;
+    });
+    await Repo.instance.touch();
+    if (!wasPlaying) {
+      await _preview();
+    } else {
+      await _player.pause();
     }
   }
 

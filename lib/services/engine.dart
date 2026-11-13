@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'dart:math' as math;
 
+import 'demucs.dart';
 import 'spectral.dart';
 
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
@@ -424,6 +425,61 @@ class Engine {
     u32(byteLen);
     b.add(int16.buffer.asUint8List());
     File(path).writeAsBytesSync(b.toBytes());
+  }
+
+  /// Demucs 神经网络分离：人声/伴奏彻底分开（需先下载模型）
+  Future<Map<String, String>> separateModel(
+    Track track,
+    String outDir,
+    String modelPath, {
+    void Function(double p)? onProgress,
+  }) async {
+    final base = track.name.contains('.')
+        ? track.name.substring(0, track.name.lastIndexOf('.'))
+        : track.name;
+    final mixRaw = '$outDir/.${base}_mx44.f32';
+    final vocalRaw = '$outDir/.${base}_vx44.f32';
+    final instRaw = '$outDir/.${base}_ix44.f32';
+    final vocalPath = '$outDir/${base}_人声.wav';
+    final instPath = '$outDir/${base}_伴奏.wav';
+
+    // 1. 解码成 44.1k 立体声浮点（模型固定吃这个格式）
+    final err1 = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', track.path,
+      '-vn', '-ac', '2', '-ar', '44100', '-f', 'f32le', '-acodec', 'pcm_f32le', mixRaw,
+    ]);
+    if (err1 != null) return {'error': err1};
+
+    final samples = (await File(mixRaw).length()) ~/ 8;
+
+    // 2. 原生跑模型（分块 + 重叠相加）
+    await Demucs.instance.separate(
+      modelPath: modelPath,
+      mixRawPath: mixRaw,
+      vocalRawPath: vocalRaw,
+      instRawPath: instRaw,
+      samplesPerChannel: samples,
+      onProgress: onProgress,
+    );
+
+    // 3. 裸浮点转成 wav
+    final err2 = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-f', 'f32le', '-ar', '44100', '-ac', '2',
+      '-i', vocalRaw, '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2', vocalPath,
+    ]);
+    if (err2 != null) return {'error': err2};
+    final err3 = await _run([
+      '-hide_banner', '-loglevel', 'error', '-y', '-f', 'f32le', '-ar', '44100', '-ac', '2',
+      '-i', instRaw, '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2', instPath,
+    ]);
+    if (err3 != null) return {'error': err3};
+
+    for (final f in [mixRaw, vocalRaw, instRaw]) {
+      try {
+        await File(f).delete();
+      } catch (_) {}
+    }
+    return {'vocal': vocalPath, 'inst': instPath};
   }
 
   /// 快速人声/伴奏分离：中置声道提取 + 反相抵消（立体声歌曲用，秒出结果）
